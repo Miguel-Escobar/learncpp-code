@@ -14,7 +14,7 @@
                 "-Wextra", // Enable some extra warning flags
                 "-Wconversion", // Warn for implicit conversions that may alter a value
                 "-Wsign-conversion", // Warn for implicit conversions that may change the sign of an integer value
-                "-Werror", // Make warnings into errors
+                // "-Werror", // Make warnings into errors
                 "-std=c++20", // Use the C++20 standard
                 "${file}",
                 "-o",

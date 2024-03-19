@@ -1,0 +1,573 @@
+En este .txt están las instrucciones para instalar y usar el código que resuelve numéricamente
+FHN en redes complejas de mundo pequeño.
+
+1.- Visual Studio > Nuevo proyecto en C++ > Aplicación de consola (incluye una plantilla con hola mundo)
+	1.1 Setear en modo release (en modo debug anda muy lento).
+2.- Instalar boost (que contiene ODEint) y FFTW (para realizar los cálculos del parámetro de orden), para
+ello, seguir los siguientes pasos:
+	2.1 Descargar boost de la página oficial y seguir los pasos de la sección 4.1
+	(ver https://www.boost.org/doc/libs/1_84_0/more/getting_started/windows.html)
+	2.2 Seguir pasos de https://stackoverflow.com/questions/39675436/how-to-get-fftw-working-on-windows-for-dummies
+	En el caso particular también incluir "libfftw3f-3.def y libfftw3l-3.def", además de "libfftw3-3.lib" que es la
+	que aparece de ejemplo.
+3.- El código arroja un warning que se puede pasar por alto. Para ello:
+	3.1 Ir a propiedades del archivo > C/C++ > Avanzadas > Deshabilitir advertencias específicas > agregar en el espacio "4996"
+4.- Al parecer hay un problema de versiones para utilizar la libreria que guarda archivos, para solucionar
+ese problema, se debe cambiar la versión del lenguaje de C++ de Microsoft Visual Studio. Para ello:
+	4.1 Nuevamente a propiedades del archivo > C/C++ > Idioma > Estándar de lenguaje C++ > Escoger "Estándar ISO C++17 (/std:c++17)"
+	4.1 Chequear que en propiedades del archivo > Propiedades de configuración > General > Propiedades generales > Estándar de 	lenguaje C++ También se específique "Estándar ISO C++17 (/std:c++17)".
+
+Con esto el código debería correr sin problemas, va copiado y pegado a continuación. Hay dos versiones que deberían ser las mismas,
+pero entre arreglo y arreglo quizás se pasó algo por lo que copio y pego ambas. Lo único que se debe cambiar es en:
+
+	string output_directory = "..."; <- Cambiar por el directorio donde se desea guardar el archivo .csv con los datos.
+
+
+############## 1ER CODIGO QUE ARROJA EL R DE KURAMOTO PROMEDIADO #####################
+############## SOBRE VARIAS REALIZACIONES PARA DIFERENTES PARAMS #####################
+############## DEL SISTEMA                                       #####################
+
+#include <iostream>
+#include <boost/graph/adjacency_list.hpp>
+#include <boost/graph/small_world_generator.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <chrono> // Para obtener una semilla única basada en el tiempo actual
+#include <vector>
+#include <boost/numeric/odeint.hpp>
+#include <random>
+#include <cmath>
+#include <omp.h>
+#include <fftw3.h>
+#include <complex>
+#include <fstream> // Para trabajar con archivos
+#include <numeric>
+#include <filesystem>
+
+using namespace std;
+using namespace boost::numeric::odeint;
+namespace fs = std::filesystem;
+
+// parámetros del sistema
+const double pi = 3.14159265358979323846;
+const double epsilon = 0.05;
+const double alpha = (pi / 2) - 0.1;
+const double a = 0.5;
+const double cos_alpha = cos(alpha);
+const double sin_alpha = sin(alpha);
+
+
+// def del tipo de estado
+typedef vector<double> state_type;
+
+// Definición del tipo de gráfico para la red de Watts-Strogatz
+typedef boost::adjacency_list<boost::vecS, boost::vecS, boost::undirectedS> Graph;
+typedef vector<vector<size_t>> AdjacencyList;
+
+// Función para generar una red de Watts-Strogatz utilizando Boost Graph Library
+Graph generate_watts_strogatz_graph(size_t N, size_t k, double p) {
+    // Definir el generador de números aleatorios
+    auto seed = chrono::system_clock::now().time_since_epoch().count();
+    boost::random::mt19937 rng(seed);
+
+    // Generar la red de Watts-Strogatz
+    Graph g(N);
+    boost::small_world_iterator<boost::random::mt19937, Graph> iter(rng, N, k, p, false);
+    boost::small_world_iterator<boost::random::mt19937, Graph> end;
+    for (; iter != end; ++iter) {
+        boost::add_edge(iter->first, iter->second, g);
+    }
+
+    return g;
+}
+
+AdjacencyList generate_adjacency_list(const Graph& g) {
+    size_t N = boost::num_vertices(g);
+    AdjacencyList adj_list(N);
+    for (size_t i = 0; i < N; ++i) {
+        auto range = boost::adjacent_vertices(i, g);
+        for (auto it = range.first; it != range.second; ++it) {
+            size_t j = *it;
+            adj_list[i].push_back(j);
+        }
+    }
+    return adj_list;
+}
+
+// Función para calcular la transformada de Hilbert de una serie de tiempo
+vector<double> hilbert_transform(const vector<double>& input) {
+    // Definir el tamaño de la señal de entrada
+    size_t N = input.size();
+
+    // Crear plan para la DFT
+    fftw_complex* in = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+    fftw_complex* out = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+    fftw_plan plan_forward = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+
+    // Copiar la señal de entrada a la parte real de la matriz de entrada
+    for (size_t i = 0; i < N; ++i) {
+        in[i][0] = input[i];
+        in[i][1] = 0.0;
+    }
+
+    // Ejecutar la transformada de Fourier directa
+    fftw_execute(plan_forward);
+
+    // Calcular la transformada de Hilbert
+    for (size_t i = 0; i < N / 2; ++i) {
+        double temp_real = out[i][0];
+        double temp_imag = out[i][1];
+        out[i][0] = -temp_imag;
+        out[i][1] = temp_real;
+    }
+
+    // Crear un plan para la transformada de Fourier inversa
+    fftw_plan plan_backward = fftw_plan_dft_1d(N, out, in, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+    // Ejecutarla
+    fftw_execute(plan_backward);
+
+    // Normalizar y extraer la parte real de la transformada inversa
+    vector<double> hilbert(N);
+    for (size_t i = 0; i < N; ++i) {
+        hilbert[i] = in[i][0] / N;
+    }
+
+    // Liberar memoria y destruir planes
+    fftw_destroy_plan(plan_forward);
+    fftw_destroy_plan(plan_backward);
+    fftw_free(in);
+    fftw_free(out);
+
+    return hilbert;
+}
+
+// Función para calcular la fase de una serie de tiempo compleja
+vector<double> calculate_phase(const vector<double>& real_part, const vector<double>& imag_part) {
+    // Verificar si los tamaños de las partes real e imaginaria son iguales
+    if (real_part.size() != imag_part.size()) {
+        cerr << "Error: Tamaños de las partes real e imaginaria no coinciden." << endl;
+        return vector<double>();
+    }
+
+    size_t N = real_part.size();
+    vector<double> phase(N);
+
+    // Calcular la fase como atan2(imag_part[i], real_part[i])
+    for (size_t i = 0; i < N; ++i) {
+        phase[i] = atan2(imag_part[i], real_part[i]);
+    }
+
+    return phase;
+}
+
+// Función para calcular el parámetro de orden global de Kuramoto
+double calculate_global_order_parameter(const vector<double>& phases) {
+    // Sumar la exponencial imaginaria de todas las fases
+    complex<double> sum(0.0, 0.0);
+    for (double phase : phases) {
+        sum += exp(complex<double>(0.0, phase));
+    }
+
+    // Dividir por el número total de nodos y calcular el valor absoluto
+    return abs(sum) / phases.size();
+}
+
+void fhn_model(const state_type& xy, state_type& dxydt, const double /* t*/, const AdjacencyList& adj_list, double d) {
+    const size_t N = xy.size() / 2;
+    state_type x(N), y(N);
+    for (size_t i = 0; i < N; ++i) {
+        x[i] = xy[i];
+        y[i] = xy[i + N];
+    }
+
+    //#pragma omp parallel for
+    for (size_t i = 0; i < N; ++i) {
+        double sum1 = 0.0, sum2 = 0.0;
+        for (size_t j : adj_list[i]) {
+            sum1 += cos_alpha * (x[j] - x[i]) + sin_alpha * (y[j] - y[i]);
+            sum2 += -sin_alpha * (x[j] - x[i]) + cos_alpha * (y[j] - y[i]);
+
+        }
+        dxydt[i] = (x[i] - y[i] - (x[i] * x[i] * x[i]) / 3 + d * sum1) / epsilon;
+        dxydt[i + N] = x[i] + a + d * sum2;
+
+    }
+}
+
+int main() {
+    // parametros red
+    double d_start = 0.0, d_end = 1.0, d_step = 0.02;
+    size_t N_start = 10, N_end = 250, N_step = 10;
+    size_t num_simulations = 100, k = 6; // num simulations and k mean
+    double p = 1.0; // rewiring prob
+
+    // Directorio donde se guardará el archivo CSV
+    string output_directory = "C:/Users/drayf/Desktop/U/Magíster/Semestre III/Codigos/test_with_cpp";
+    fs::create_directory(output_directory); // Crear el directorio si no existe
+
+    ofstream outfile(output_directory + "/promedios_temporales.csv");
+    if (!outfile.is_open()) {
+        cerr << "Error al abrir el archivo de salida." << endl;
+        return 1;
+    }
+
+    outfile << "d,N,PromedioTemporal" << endl;
+
+
+    // definir integrador
+    typedef runge_kutta_cash_karp54<state_type> stepper_type;
+
+    for (double d = d_start; d <= d_end; d += d_step) {
+        for (size_t N = N_start; N <= N_end; N += N_step) {
+
+            // vector para almacenar los promedios temporales de cada simulación
+            vector<double> average_global_order_parameters;
+
+            // resolver el modelo y guardar series de tiempo
+#pragma omp parallel for
+            for (size_t sim = 0; sim < num_simulations; ++sim) {
+                // generar red
+                Graph g = generate_watts_strogatz_graph(N, k, p);
+                AdjacencyList adj_list = generate_adjacency_list(g);
+
+                // generar condiciones iniciales dist uniformes
+
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_real_distribution<> dis_x(-1.0, 1.0); // cond ini x
+                std::uniform_real_distribution<> dis_y(-0.5, 0.5); // cond ini y
+
+                // definir estado inicial
+                state_type xy(2 * N);
+                for (size_t i = 0; i < N; ++i) {
+                    xy[i] = dis_x(gen);
+                    xy[i + N] = dis_y(gen);
+                }
+
+                vector<vector<double>> time_series(N, vector<double>());
+
+                integrate_const(stepper_type(), [&](const state_type& xy, state_type& dxydt, const double t) {
+                    fhn_model(xy, dxydt, t, adj_list, d);
+
+                    // Almacenar los valores del 20% final para cada nodo
+                    if (t >= 800.0) {
+                        for (size_t i = 0; i < N; ++i) {
+                            time_series[i].push_back(xy[i]);
+                        }
+                    }
+                    }, xy, 0.0, 1000.0, 0.01);
+
+                vector<vector<double>> phases(N);
+                for (size_t i = 0; i < N; ++i) {
+                    vector<double> hilbert_transforms = hilbert_transform(time_series[i]);
+                    phases[i] = calculate_phase(time_series[i], hilbert_transforms);
+                }
+
+                vector<double> global_order_parameter_time_series;
+                for (size_t t = 0; t < time_series[0].size(); ++t) {
+                    // Calcular la suma de las exponenciales imaginarias de las fases
+                    complex<double> sum(0.0, 0.0);
+                    for (size_t i = 0; i < N; ++i) {
+                        sum += exp(complex<double>(0.0, phases[i][t]));
+                    }
+                    // Calcular el parámetro de orden global y almacenarlo en la serie de tiempo
+                    global_order_parameter_time_series.push_back(abs(sum) / N);
+                }
+
+                // Calcular el promedio temporal del parámetro de orden global para esta simulación
+                double average_global_order_parameter = accumulate(global_order_parameter_time_series.begin(), global_order_parameter_time_series.end(), 0.0) / global_order_parameter_time_series.size();
+
+                // Imprimir el promedio temporal para esta simulación
+                #pragma omp critical
+                average_global_order_parameters.push_back(average_global_order_parameter);
+            }
+
+            // Calcular el promedio de los promedios temporales de todas las simulaciones
+            double overall_average = accumulate(average_global_order_parameters.begin(), average_global_order_parameters.end(), 0.0) / average_global_order_parameters.size();
+
+            // Imprimir el promedio general de los promedios temporales
+            cout << "Para d = " << d << ", N = " << N << ": Promedio general de los promedios temporales: " << overall_average << endl;
+
+            outfile << d << "," << N << "," << overall_average << endl;
+
+        }
+    }
+
+    outfile.close();
+
+    return 0;
+}
+
+#####################################################################################################
+######################################## SEGUNDA VERSIÓN ############################################
+#####################################################################################################
+
+#include <iostream>
+#include <boost/graph/adjacency_list.hpp>
+#include <boost/graph/small_world_generator.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <chrono> // Para obtener una semilla única basada en el tiempo actual
+#include <vector>
+#include <boost/numeric/odeint.hpp>
+#include <random>
+#include <cmath>
+#include <omp.h>
+#include <fftw3.h>
+#include <complex>
+#include <fstream> // Para trabajar con archivos
+#include <numeric>
+#include <filesystem>
+
+using namespace std;
+using namespace boost::numeric::odeint;
+namespace fs = std::filesystem;
+
+// parámetros del sistema
+const double pi = 3.14159265358979323846;
+const double epsilon = 0.05;
+const double alpha = (pi / 2) - 0.1;
+const double a = 0.5;
+const double cos_alpha = cos(alpha);
+const double sin_alpha = sin(alpha);
+
+
+// def del tipo de estado
+typedef vector<double> state_type;
+
+// Definición del tipo de gráfico para la red de Watts-Strogatz
+typedef boost::adjacency_list<boost::vecS, boost::vecS, boost::undirectedS> Graph;
+typedef vector<vector<size_t>> AdjacencyList;
+
+// Función para generar una red de Watts-Strogatz utilizando Boost Graph Library
+Graph generate_watts_strogatz_graph(size_t N, size_t k, double p) {
+    // Definir el generador de números aleatorios
+    auto seed = chrono::system_clock::now().time_since_epoch().count();
+    boost::random::mt19937 rng(seed);
+
+    // Generar la red de Watts-Strogatz
+    Graph g(N);
+    boost::small_world_iterator<boost::random::mt19937, Graph> iter(rng, N, k, p, false);
+    boost::small_world_iterator<boost::random::mt19937, Graph> end;
+    for (; iter != end; ++iter) {
+        boost::add_edge(iter->first, iter->second, g);
+    }
+
+    return g;
+}
+
+AdjacencyList generate_adjacency_list(const Graph& g) {
+    size_t N = boost::num_vertices(g);
+    AdjacencyList adj_list(N);
+    for (size_t i = 0; i < N; ++i) {
+        auto range = boost::adjacent_vertices(i, g);
+        for (auto it = range.first; it != range.second; ++it) {
+            size_t j = *it;
+            adj_list[i].push_back(j);
+        }
+    }
+    return adj_list;
+}
+
+// Función para calcular la transformada de Hilbert de una serie de tiempo
+vector<double> hilbert_transform(const vector<double>& input) {
+    // Definir el tamaño de la señal de entrada
+    size_t N = input.size();
+
+    // Crear plan para la DFT
+    fftw_complex* in = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+    fftw_complex* out = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * N);
+    fftw_plan plan_forward = fftw_plan_dft_1d(N, in, out, FFTW_FORWARD, FFTW_ESTIMATE);
+
+    // Copiar la señal de entrada a la parte real de la matriz de entrada
+    for (size_t i = 0; i < N; ++i) {
+        in[i][0] = input[i];
+        in[i][1] = 0.0;
+    }
+
+    // Ejecutar la transformada de Fourier directa
+    fftw_execute(plan_forward);
+
+    // Calcular la transformada de Hilbert
+    for (size_t i = 0; i < N / 2; ++i) {
+        double temp_real = out[i][0];
+        double temp_imag = out[i][1];
+        out[i][0] = -temp_imag;
+        out[i][1] = temp_real;
+    }
+
+    // Crear un plan para la transformada de Fourier inversa
+    fftw_plan plan_backward = fftw_plan_dft_1d(N, out, in, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+    // Ejecutarla
+    fftw_execute(plan_backward);
+
+    // Normalizar y extraer la parte real de la transformada inversa
+    vector<double> hilbert(N);
+    for (size_t i = 0; i < N; ++i) {
+        hilbert[i] = in[i][0] / N;
+    }
+
+    // Liberar memoria y destruir planes
+    fftw_destroy_plan(plan_forward);
+    fftw_destroy_plan(plan_backward);
+    fftw_free(in);
+    fftw_free(out);
+
+    return hilbert;
+}
+
+// Función para calcular la fase de una serie de tiempo compleja
+vector<double> calculate_phase(const vector<double>& real_part, const vector<double>& imag_part) {
+    // Verificar si los tamaños de las partes real e imaginaria son iguales
+    if (real_part.size() != imag_part.size()) {
+        cerr << "Error: Tamaños de las partes real e imaginaria no coinciden." << endl;
+        return vector<double>();
+    }
+
+    size_t N = real_part.size();
+    vector<double> phase(N);
+
+    // Calcular la fase como atan2(imag_part[i], real_part[i])
+    for (size_t i = 0; i < N; ++i) {
+        phase[i] = atan2(imag_part[i], real_part[i]);
+    }
+
+    return phase;
+}
+
+// Función para calcular el parámetro de orden global de Kuramoto
+double calculate_global_order_parameter(const vector<double>& phases) {
+    // Sumar la exponencial imaginaria de todas las fases
+    complex<double> sum(0.0, 0.0);
+    for (double phase : phases) {
+        sum += exp(complex<double>(0.0, phase));
+    }
+
+    // Dividir por el número total de nodos y calcular el valor absoluto
+    return abs(sum) / phases.size();
+}
+
+void fhn_model(const state_type& xy, state_type& dxydt, const double /* t*/, const AdjacencyList& adj_list, double d) {
+    const size_t N = xy.size() / 2;
+    state_type x(N), y(N);
+    for (size_t i = 0; i < N; ++i) {
+        x[i] = xy[i];
+        y[i] = xy[i + N];
+    }
+
+    //#pragma omp parallel for
+    for (size_t i = 0; i < N; ++i) {
+        double sum1 = 0.0, sum2 = 0.0;
+        for (size_t j : adj_list[i]) {
+            sum1 += cos_alpha * (x[j] - x[i]) + sin_alpha * (y[j] - y[i]);
+            sum2 += -sin_alpha * (x[j] - x[i]) + cos_alpha * (y[j] - y[i]);
+
+        }
+        dxydt[i] = (x[i] - y[i] - (x[i] * x[i] * x[i]) / 3 + d * sum1) / epsilon;
+        dxydt[i + N] = x[i] + a + d * sum2;
+
+    }
+}
+
+int main() {
+    // parametros red
+    double d_start = 0.0, d_end = 1.0, d_step = 0.02;
+    size_t N_start = 10, N_end = 250, N_step = 10;
+    size_t num_simulations = 1, k = 6; // num simulations and k mean
+    double p = 1.0; // rewiring prob
+
+    // Directorio donde se guardará el archivo CSV
+    string output_directory = "C:/Users/drayf/Desktop/U/Magíster/Semestre III/Codigos/test_with_cpp";
+    fs::create_directory(output_directory); // Crear el directorio si no existe
+
+    ofstream outfile(output_directory + "/promedios_temporales.csv");
+    if (!outfile.is_open()) {
+        cerr << "Error al abrir el archivo de salida." << endl;
+        return 1;
+    }
+
+    outfile << "d,N,PromedioTemporal" << endl;
+
+
+    // definir integrador
+    typedef runge_kutta_cash_karp54<state_type> stepper_type;
+
+    for (double d = d_start; d <= d_end; d += d_step) {
+        for (size_t N = N_start; N <= N_end; N += N_step) {
+
+            // vector para almacenar los promedios temporales de cada simulación
+            vector<double> average_global_order_parameters(num_simulations);
+
+            // resolver el modelo y guardar series de tiempo
+#pragma omp parallel for
+            for (size_t sim = 0; sim < num_simulations; ++sim) {
+                // generar red
+                Graph g = generate_watts_strogatz_graph(N, k, p);
+                AdjacencyList adj_list = generate_adjacency_list(g);
+
+                // generar condiciones iniciales dist uniformes
+
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_real_distribution<> dis_x(-1.0, 1.0); // cond ini x CAMBIAR
+                std::uniform_real_distribution<> dis_y(-0.5, 0.5); // cond ini y
+
+                // definir estado inicial
+                state_type xy(2 * N);
+                for (size_t i = 0; i < N; ++i) {
+                    xy[i] = dis_x(gen);
+                    xy[i + N] = dis_y(gen);
+                }
+
+                vector<vector<double>> time_series(N, vector<double>());
+
+                integrate_const(stepper_type(), [&](const state_type& xy, state_type& dxydt, const double t) {
+                    fhn_model(xy, dxydt, t, adj_list, d);
+
+                    // Almacenar los valores del 20% final para cada nodo
+                    if (t >= 800.0) {
+                        for (size_t i = 0; i < N; ++i) {
+                            time_series[i].push_back(xy[i]);
+                        }
+                    }
+                    }, xy, 0.0, 1000.0, 0.01);
+
+                vector<vector<double>> phases(N);
+                for (size_t i = 0; i < N; ++i) {
+                    vector<double> hilbert_transforms = hilbert_transform(time_series[i]);
+                    phases[i] = calculate_phase(time_series[i], hilbert_transforms);
+                }
+
+                vector<double> global_order_parameter_time_series;
+                for (size_t t = 0; t < time_series[0].size(); ++t) {
+                    // Calcular la suma de las exponenciales imaginarias de las fases
+                    complex<double> sum(0.0, 0.0);
+                    for (size_t i = 0; i < N; ++i) {
+                        sum += exp(complex<double>(0.0, phases[i][t]));
+                    }
+                    // Calcular el parámetro de orden global y almacenarlo en la serie de tiempo
+                    global_order_parameter_time_series.push_back(abs(sum) / N);
+                }
+
+                // Calcular el promedio temporal del parámetro de orden global para esta simulación
+                double average_global_order_parameter = accumulate(global_order_parameter_time_series.begin(), global_order_parameter_time_series.end(), 0.0) / global_order_parameter_time_series.size();
+
+                // Imprimir el promedio temporal para esta simulación
+                average_global_order_parameters[sim] = average_global_order_parameter;
+            }
+
+            // Calcular el promedio de los promedios temporales de todas las simulaciones
+            double overall_average = accumulate(average_global_order_parameters.begin(), average_global_order_parameters.end(), 0.0) / average_global_order_parameters.size();
+
+            // Imprimir el promedio general de los promedios temporales
+            cout << "Para d = " << d << ", N = " << N << ": Promedio general de los promedios temporales: " << overall_average << endl;
+
+            outfile << d << "," << N << "," << overall_average << endl;
+
+        }
+    }
+
+    outfile.close();
+
+    return 0;
+}

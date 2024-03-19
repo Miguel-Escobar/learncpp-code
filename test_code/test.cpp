@@ -17,6 +17,6 @@ py::array_t<double> my_function() {
     return result;
 }
 
-PYBIND11_MODULE(my_module, m) {
+PYBIND11_MODULE(hola, m) {
     m.def("my_function", &my_function);
 }
