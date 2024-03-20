@@ -5,6 +5,7 @@
 #include <pybind11/numpy.h>
 #include <functional> // for declaring lambda functions
 #include <typeinfo> // for learning purposes
+#include <tuple> // for returning multiple values
 
 // Define namespaces
 namespace py = pybind11;
@@ -94,9 +95,62 @@ void coupled_fhn_eom(const vector<double> &x, vector<double> &dxdt, const double
     }
 }
 
+//[ integrate_observer
+struct push_back_state_and_time
+/**
+ * @brief A struct that represents a push_back_state_and_time object.
+ * 
+ * This struct is used to store states and times in vectors. It provides an operator() function
+ * that allows pushing back a state and time into the respective vectors.
+ * 
+ * @param m_states A reference to a vector of vectors of doubles to store the states.
+ * @param m_times A reference to a vector of doubles to store the times.
+ */
+struct push_back_state_and_time
+{
+    std::vector< vector<double> >& m_states;
+    std::vector< double >& m_times;
+
+    /**
+     * @brief Constructs a push_back_state_and_time object with the given states and times vectors.
+     * 
+     * @param states A reference to a vector of vectors of doubles representing the states.
+     * @param times A reference to a vector of doubles representing the times.
+     */
+    push_back_state_and_time( std::vector< vector<double> > &states , std::vector< double > &times )
+    : m_states( states ) , m_times( times ) { }
+
+    /**
+     * @brief Pushes back a state and time into the respective vectors.
+     * 
+     * @param x A reference to a vector of doubles representing the state.
+     * @param t A double representing the time.
+     */
+    void operator()( const vector<double> &x , double t )
+    {
+        m_states.push_back( x );
+        m_times.push_back( t );
+    }
+};
+//]
+
+
 // Define the function to solve the coupled FHN equations
-double solve_coupled_fhn(const double a, const double eps, const double phi, const double coupling_strength,
-                         const double t_final, const py::array_t<double> &x0_python, const py::array_t<double> &coupling_matrix_python) {
+/**
+ * Solves the coupled FitzHugh-Nagumo (FHN) equations using an adaptive integrator.
+ * 
+ * @param a The parameter 'a' in the FHN equations.
+ * @param eps The parameter 'eps' in the FHN equations.
+ * @param phi The parameter 'phi' in the FHN equations.
+ * @param coupling_strength The strength of coupling between neurons.
+ * @param t_final The final time for integration.
+ * @param initial_dt The initial time step for integration.
+ * @param x0_python The initial state vector of the system.
+ * @param coupling_matrix_python The coupling matrix between neurons.
+ * @return A tuple containing the time array and the state array as numpy arrays.
+ */
+std::tuple<py::array_t<double>, py::array_t<double>> solve_coupled_fhn(const double a, const double eps, const double phi, const double coupling_strength,
+                         const double t_final, double initial_dt, const py::array_t<double> &x0_python, const py::array_t<double> &coupling_matrix_python) {
     // Extract the system length and number of neurons                        
     size_t system_length = x0_python.shape(0);
     size_t N = system_length / 2;
@@ -126,14 +180,47 @@ double solve_coupled_fhn(const double a, const double eps, const double phi, con
         coupled_fhn_eom(x, dxdt, a, eps, coupling_strength, coupling_matrix, b, N);
     };
 
-    // // Define the integrator (use adaptive stepper)
-    // ode::runge_kutta_dopri5<std::vector<double>> stepper;
-    
-    // Integrate the system with adaptive timestep
-    size_t steps = ode::integrate(shortened_coupled_fhn_eom, x, 0.0, t_final, 0.01);
+    //[ define_adapt_stepper
+    typedef ode::runge_kutta_cash_karp54< vector<double> > error_stepper_type;
+    //]
 
-    // Return the results as a numpy array
-    
+
+
+    //[ integrate_adapt
+    typedef ode::controlled_runge_kutta< error_stepper_type > controlled_stepper_type;
+    controlled_stepper_type controlled_stepper;
+    vector<vector<double>> x_vec;
+    vector<double> times;
+
+    size_t steps = integrate_adaptive( controlled_stepper , shortened_coupled_fhn_eom, x , 0.0 , t_final, initial_dt, push_back_state_and_time( x_vec , times ));
+    //]
+
+    // Return t and x_vec as numpy arrays:
+    // Create a py::array object to store the x_vec data
+    py::array_t<double> x_result = py::array_t<double>({steps, system_length});
+
+    // Create a pointer to the data buffer of the py::array object
+    auto x_result_ptr = x_result.mutable_unchecked<2>();
+
+    // Fill the py::array object with the data
+    for (size_t i = 0; i < steps; ++i) {
+        for (size_t j = 0; j < system_length; ++j) {
+            x_result_ptr(i, j) = x_vec[i][j];
+        }
+    }
+
+    // Create a py::array object to store the times data
+    py::array_t<double> times_result = py::array_t<double>(steps);
+
+    // Create a pointer to the data buffer of the py::array object
+    auto times_result_ptr = times_result.mutable_unchecked<1>();
+
+    // Fill the py::array object with the data
+    for (size_t i = 0; i < steps; ++i) {
+        times_result_ptr(i) = times[i];
+    }
+
+    return std::make_tuple(times_result, x_result);
 }
 
 PYBIND11_MODULE(javier, m) {
