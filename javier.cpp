@@ -96,7 +96,6 @@ void coupled_fhn_eom(const vector<double> &x, vector<double> &dxdt, const double
 }
 
 //[ integrate_observer
-struct push_back_state_and_time
 /**
  * @brief A struct that represents a push_back_state_and_time object.
  * 
@@ -105,7 +104,7 @@ struct push_back_state_and_time
  * 
  * @param m_states A reference to a vector of vectors of doubles to store the states.
  * @param m_times A reference to a vector of doubles to store the times.
- */
+ */\
 struct push_back_state_and_time
 {
     std::vector< vector<double> >& m_states;
@@ -180,20 +179,31 @@ std::tuple<py::array_t<double>, py::array_t<double>> solve_coupled_fhn(const dou
         coupled_fhn_eom(x, dxdt, a, eps, coupling_strength, coupling_matrix, b, N);
     };
 
-    //[ define_adapt_stepper
-    typedef ode::runge_kutta_cash_karp54< vector<double> > error_stepper_type;
+    // //[ define_adapt_stepper
+    // typedef ode::runge_kutta_cash_karp54< vector<double> > error_stepper_type;
+    // //]
+
+
+
+    // //[ integrate_adapt
+    // typedef ode::controlled_runge_kutta< error_stepper_type > controlled_stepper_type;
+    // controlled_stepper_type controlled_stepper;
+    // vector<vector<double>> x_vec;
+    // vector<double> times;
+
+    // size_t steps = integrate_adaptive( controlled_stepper , shortened_coupled_fhn_eom, x , 0.0 , t_final, initial_dt, push_back_state_and_time( x_vec , times ));
+    // //]
+
+    //[ define_stepper
+    typedef ode::runge_kutta4<vector<double>> stepper_type;
     //]
 
-
-
-    //[ integrate_adapt
-    typedef ode::controlled_runge_kutta< error_stepper_type > controlled_stepper_type;
-    controlled_stepper_type controlled_stepper;
+    //[ integrate_const
+    stepper_type stepper;
     vector<vector<double>> x_vec;
     vector<double> times;
 
-    size_t steps = integrate_adaptive( controlled_stepper , shortened_coupled_fhn_eom, x , 0.0 , t_final, initial_dt, push_back_state_and_time( x_vec , times ));
-    //]
+    size_t steps = integrate_const(stepper, shortened_coupled_fhn_eom, x, 0.0, t_final, initial_dt, push_back_state_and_time(x_vec, times));
 
     // Return t and x_vec as numpy arrays:
     // Create a py::array object to store the x_vec data
